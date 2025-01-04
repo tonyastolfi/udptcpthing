@@ -1,3 +1,8 @@
+#include "buffers.hpp"
+#include "clock.hpp"
+#include "help.hpp"
+#include "mapping_table.hpp"
+#include "message.hpp"
 #include "types.hpp"
 
 #include <batteries/assert.hpp>
@@ -21,191 +26,43 @@
 #include <type_traits>
 #include <vector>
 
-struct TcpFrame {
-    little_u32 size;
-    little_u32 src_ip;
-    little_u32 dst_ip;
-    little_u16 src_port;
-    little_u16 dst_port;
-};
-
-struct Memory {
-    using Block = std::aligned_storage_t<64, 8>;
-
-    static std::shared_ptr<Memory> alloc(usize n) noexcept
-    {
-        const usize blocks = (n + 63) / 64;
-        auto memory = std::make_shared<Memory>();
-        memory->storage.reset(new Block[blocks]);
-        memory->size = blocks * 64;
-        return memory;
-    }
-
-    std::unique_ptr<Block[]> storage;
-    usize size;
-
-    batt::MutableBuffer as_buffer() const noexcept
-    {
-        return batt::MutableBuffer{this->storage.get(), this->size};
-    }
-};
-
-template <typename T>
-struct BufferImpl {
-    T buffer;
-    std::shared_ptr<Memory> memory;
-
-    usize size() const noexcept
-    {
-        return this->buffer.size();
-    }
-
-    bool empty() const noexcept
-    {
-        return this->size() == 0;
-    }
-
-    operator T() const noexcept
-    {
-        return this->buffer;
-    }
-
-    BufferImpl take(usize n) noexcept
-    {
-        BATT_CHECK_LE(n, this->size());
-
-        BufferImpl result;
-        result.buffer = T{this->buffer.data(), n};
-        result.memory = this->memory;
-
-        this->buffer += n;
-
-        return result;
-    }
-};
-
-using CBuffer = BufferImpl<batt::ConstBuffer>;
-using MBuffer = BufferImpl<batt::MutableBuffer>;
-
-template <typename T>
-struct BuffersImpl {
-    batt::SmallVec<BufferImpl<T>, 2> buffers;
-
-    usize size() const noexcept
-    {
-        usize n = 0;
-        for (const auto& b : this->buffers) {
-            n += b.size();
-        }
-        return n;
-    }
-
-    void grow(usize n) noexcept
-    {
-        auto memory = Memory::alloc(n);
-        BufferImpl<T> b;
-        b.buffer = memory->as_buffer();
-        b.memory = std::move(memory);
-        this->buffers.emplace_back(std::move(b));
-    }
-
-    BuffersImpl take(usize n) noexcept
-    {
-        const usize orig_n = n;
-
-        BATT_CHECK_LE(n, this->size());
-
-        BuffersImpl result;
-
-        while (n > 0) {
-            const usize m = std::min(n, this->buffers.front().size());
-            result.buffers.emplace_back(this->buffers.front().take(m));
-            n -= m;
-            BATT_CHECK_LT(n, orig_n);
-            if (this->buffers.front().empty()) {
-                this->buffers.erase(this->buffers.begin());
-            } else {
-                BATT_CHECK_EQ(n, 0);
-            }
-        }
-
-        BATT_CHECK_EQ(result.size(), orig_n);
-
-        return result;
-    }
-
-    BuffersImpl<batt::ConstBuffer> freeze() const noexcept
-    {
-        BuffersImpl<batt::ConstBuffer> result;
-
-        for (const auto& b : this->buffers) {
-            CBuffer cb;
-            cb.buffer = b.buffer;
-            cb.memory = b.memory;
-            result.buffers.emplace_back(std::move(cb));
-        }
-
-        return result;
-    }
-
-    std::string collect_str() const noexcept
-    {
-        std::ostringstream oss;
-        for (const auto& b : this->buffers) {
-            oss.write((const char*)b.buffer.data(), b.buffer.size());
-        }
-        return std::move(oss).str();
-    }
-};
-
-using CBuffers = BuffersImpl<batt::ConstBuffer>;
-using MBuffers = BuffersImpl<batt::MutableBuffer>;
-
-struct UdpMessage {
-    boost::asio::ip::udp::endpoint src;
-    boost::asio::ip::udp::endpoint dst;
-    CBuffers data;
-};
-
-struct CacheClock {
-    using Time = std::chrono::steady_clock::time_point;
-
-    Time now_time = std::chrono::steady_clock::now();
-
-    void run()
-    {
-        for (;;) {
-            this->now_time = std::chrono::steady_clock::now();
-            batt::Task::sleep(boost::posix_time::seconds(1));
-        }
-    }
-};
-
 //=#=#==#==#===============+=+=+=+=++=++++++++++++++-++-+--+-+----+---------------
 // Task functions
 
-void udp_input(boost::asio::io_context& io);
-void tcp_input(boost::asio::io_context& io);
+void udp2tcp(boost::asio::io_context& io);
+void tcp2udp(boost::asio::io_context& io);
 
 //=#=#==#==#===============+=+=+=+=++=++++++++++++++-++-+--+-+----+---------------
 // Main
 
 int main()
 {
-    const bool front_mode = batt::getenv_as<bool>("FRONT").value_or(true);
+    if (batt::getenv_as<bool>("HELP").value_or(false)) {
+        show_help();
+        return 0;
+    }
+
+    auto mode = batt::getenv_as<std::string>("MODE");
+
+    if (!mode) {
+        show_help();
+        return 1;
+    }
 
     boost::asio::io_context io;
 
-    if (front_mode) {
-        batt::Task udp_front{io.get_executor(), [&] {
-                                 udp_input(io);
-                             }};
+    if (*mode == "udp2tcp") {
+        batt::Task udp2tcp_task{io.get_executor(), [&] {
+                                    udp2tcp(io);
+                                }};
 
         io.run();
     } else {
-        batt::Task tcp_front{io.get_executor(), [&] {
-                                 tcp_input(io);
-                             }};
+        BATT_CHECK_EQ(*mode, "tcp2udp");
+
+        batt::Task tcp2udp_task{io.get_executor(), [&] {
+                                    tcp2udp(io);
+                                }};
 
         io.run();
     }
@@ -227,7 +84,7 @@ void tcp_sender(batt::Queue<UdpMessage>& queue, boost::asio::ip::tcp::socket& tc
 
 //==#==========+==+=+=++=+++++++++++-+-+--+----- --- -- -  -  -   -
 //
-void udp_input(boost::asio::io_context& io)
+void udp2tcp(boost::asio::io_context& io)
 {
     const u16 udp_port = batt::getenv_as<u16>("UDP_PORT").value_or(19132);
     const u16 tcp_port = batt::getenv_as<u16>("TCP_PORT").value_or(7777);
@@ -280,33 +137,12 @@ void udp_input(boost::asio::io_context& io)
 
 //==#==========+==+=+=++=+++++++++++-+-+--+----- --- -- -  -  -   -
 //
-void tcp_connect(bool& connected, boost::asio::ip::tcp::socket& tcp_sock,
-                 const boost::asio::ip::tcp::endpoint& ep)
-{
-    while (!connected) {
-        std::cerr << "Connecting to " << ep << std::endl;
-        batt::ErrorCode ec = batt::Task::await<batt::ErrorCode>([&](auto&& handler) {
-            tcp_sock.async_connect(ep, handler);
-        });
-        if (ec) {
-            std::cerr << "Failed to connect; retrying after delay..." << std::endl;
-            batt::Task::sleep(boost::posix_time::seconds(1));
-            std::cerr << "Retrying..." << std::endl;
-            continue;
-        } else {
-            std::cerr << "Connected!" << std::endl;
-            connected = true;
-            break;
-        }
-    }
-}
-
-//==#==========+==+=+=++=+++++++++++-+-+--+----- --- -- -  -  -   -
-//
-void tcp_input(boost::asio::io_context& io)
+void tcp2udp(boost::asio::io_context& io)
 {
     const u16 udp_port = batt::getenv_as<u16>("UDP_PORT").value_or(19132);
     const u16 tcp_port = batt::getenv_as<u16>("TCP_PORT").value_or(7777);
+
+    const usize max_clients = batt::getenv_as<usize>("MAX_CLIENTS").value_or(16);
 
     boost::asio::ip::tcp::endpoint tcp_ep{boost::asio::ip::tcp::v4(), tcp_port};
     boost::asio::ip::tcp::acceptor tcp_acceptor{io, tcp_ep};
@@ -344,8 +180,9 @@ void tcp_input(boost::asio::io_context& io)
                 auto shared_output_queue = std::make_shared<batt::Queue<UdpMessage>>();
 
                 batt::Task::spawn(  //
-                    io.get_executor(), [&input_queue, shared_output_queue, &io, udp_ep, &clock] {
-                        UdpPortMapper mapper{*shared_output_queue, io, udp_ep, /*max_ports=*/16, clock};
+                    io.get_executor(), [&input_queue, shared_output_queue, &io, udp_ep, &clock, max_clients] {
+                        MappingTable mapper{*shared_output_queue, io, udp_ep, max_clients, clock};
+
                         auto on_scope_exit = batt::finally([&] {
                             mapper.halt();
                             mapper.join();
@@ -358,7 +195,7 @@ void tcp_input(boost::asio::io_context& io)
                                 break;
                             }
 
-                            batt::Status send_status = mapper.send(*message);
+                            batt::Status send_status = mapper.lookup(*message)->send(*message);
                             if (!send_status.ok()) {
                                 break;
                             }
@@ -378,13 +215,36 @@ void tcp_input(boost::asio::io_context& io)
 
 //==#==========+==+=+=++=+++++++++++-+-+--+----- --- -- -  -  -   -
 //
+void tcp_connect(bool& connected, boost::asio::ip::tcp::socket& tcp_sock,
+                 const boost::asio::ip::tcp::endpoint& ep)
+{
+    while (!connected) {
+        std::cerr << "Connecting to " << ep << std::endl;
+        batt::ErrorCode ec = batt::Task::await<batt::ErrorCode>([&](auto&& handler) {
+            tcp_sock.async_connect(ep, handler);
+        });
+        if (ec) {
+            std::cerr << "Failed to connect; retrying after delay..." << std::endl;
+            batt::Task::sleep(boost::posix_time::seconds(1));
+            std::cerr << "Retrying..." << std::endl;
+            continue;
+        } else {
+            std::cerr << "Connected!" << std::endl;
+            connected = true;
+            break;
+        }
+    }
+}
+
+//==#==========+==+=+=++=+++++++++++-+-+--+----- --- -- -  -  -   -
+//
 void udp_receiver(boost::asio::ip::udp::socket& udp_srv_sock, batt::Queue<UdpMessage>& queue)
 {
     MBuffers buffers;
     for (;;) {
-        if (buffers.size() < 1500) {
-            buffers.grow(1500);
-            BATT_CHECK_GE(buffers.size(), 1500);
+        if (buffers.size() < kMaxMessageSize) {
+            buffers.grow(kMaxMessageSize);
+            BATT_CHECK_GE(buffers.size(), kMaxMessageSize);
         }
 
         boost::asio::ip::udp::endpoint sender;
@@ -444,7 +304,7 @@ void tcp_sender(batt::Queue<UdpMessage>& queue, boost::asio::ip::tcp::socket& tc
         std::cerr << "Message to send: " << BATT_INSPECT(message->data.size()) << BATT_INSPECT(message->src)
                   << BATT_INSPECT(message->dst) << BATT_INSPECT_STR(message->data.collect_str()) << std::endl;
 
-        TcpFrame frame;
+        MessageFrame frame;
         frame.size = message->data.size();
         frame.src_ip = message->src.address().to_v4().to_uint();
         frame.dst_ip = message->dst.address().to_v4().to_uint();
@@ -479,7 +339,7 @@ void tcp_receiver(boost::asio::ip::tcp::socket& tcp_sock, batt::Queue<UdpMessage
     MBuffers buffers;
 
     for (;;) {
-        TcpFrame frame;
+        MessageFrame frame;
 
         std::cerr << "Receiving header" << std::endl;
 
@@ -494,10 +354,10 @@ void tcp_receiver(boost::asio::ip::tcp::socket& tcp_sock, batt::Queue<UdpMessage
 
         BATT_CHECK_EQ(*io_result, sizeof(frame));
 
-        BATT_CHECK_LE(frame.size, 1500);
-        if (buffers.size() < 1500) {
-            buffers.grow(1500);
-            BATT_CHECK_GE(buffers.size(), 1500);
+        BATT_CHECK_LE(frame.size, kMaxMessageSize);
+        if (buffers.size() < kMaxMessageSize) {
+            buffers.grow(kMaxMessageSize);
+            BATT_CHECK_GE(buffers.size(), kMaxMessageSize);
         }
 
         UdpMessage message;
