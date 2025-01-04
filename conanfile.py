@@ -38,6 +38,7 @@ class udptcpthingRecipe(ConanFile):
         cmake = CMake(self)
         cmake.install()
 
-    
+    def requirements(self):
+        self.requires("batteries/0.58.1")
 
     
