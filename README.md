@@ -7,7 +7,7 @@ The basic idea is:
 1. Download/clone this repo (it includes x86_64 Linux binaries) on the machine you'll be running the Minecraft server
 2. Create (or repurpose) a cheap, tiny VM with a static IP; I suggest using Linode, they have a shared CPU instance type for just $5/month.
   - Choose a region that is close to all the people who will be playing, to make sure latencies are low
-  - Select Ubuntu 22 Linux as the VM image
+  - Select Ubuntu 22 Linux as the VM image **Make sure you get this right or `udptcpthing` will NOT work!**
   - **Check the box that says Private IP**
   - Upload/create your ssh keys, etc.
 3. Install Minecraft Bedrock Server on the machine from step 1
