@@ -34,5 +34,5 @@ struct UdpMessage {
 inline std::ostream& operator<<(std::ostream& out, const UdpMessage& message)
 {
     return out << BATT_INSPECT(message.data.size()) << BATT_INSPECT(message.src) << BATT_INSPECT(message.dst)
-               << BATT_INSPECT_STR(message.data.collect_str())
+               << BATT_INSPECT_STR(message.data.collect_str());
 }
