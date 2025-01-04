@@ -45,3 +45,7 @@ The basic idea is:
 Now in regular Minecraft (Bedrock), hit Play, go to Servers, go to the bottom, say Add/New, give it a name, and enter the static IP of your cloud VM from step 2 (leave the port as the default).
 
 You should now be able to connect from anywhere on the internet!  Enjoy, and happy Minecrafting!
+
+## Why is this needed, and what does it do?
+
+Reverse-tunnelling over an `ssh` session from behind a NAT (e.g., home internet router) is a great, cheap way to expose servers over the internet... but this technique does not work for UDP.  There are a few Stack Overflow tutorials out there on using netcat (`nc`) or `socat` to bridge UDP to TCP, but the issue is that your proxy has to maintain state, similar to a NAT proxy, so it can correctly map UDP ports on each end of the encrypted TCP tunnel.  That is why I wrote this utility.
