@@ -3,7 +3,11 @@
 #include "buffers.hpp"
 #include "types.hpp"
 
+#include <batteries/assert.hpp>
+
 #include <boost/asio/ip/udp.hpp>
+
+#include <ostream>
 
 //=#=#==#==#===============+=+=+=+=++=++++++++++++++-++-+--+-+----+---------------
 
@@ -26,3 +30,9 @@ struct UdpMessage {
     boost::asio::ip::udp::endpoint dst;
     CBuffers data;
 };
+
+inline std::ostream& operator<<(std::ostream& out, const UdpMessage& message)
+{
+    return out << BATT_INSPECT(message.data.size()) << BATT_INSPECT(message.src) << BATT_INSPECT(message.dst)
+               << BATT_INSPECT_STR(message.data.collect_str())
+}

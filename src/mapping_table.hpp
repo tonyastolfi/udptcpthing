@@ -40,28 +40,29 @@ class MappingTable
 
         auto iter = this->mappings_.find(client_key);
         if (iter != this->mappings_.end()) {
-            std::cerr << "Mapping found in hash table!  Verifying entry..." << std::endl;
+            VLOG(2) << "Mapping found in hash table!  Verifying entry...";
             BATT_CHECK_LT(iter->second, this->entries_.size());
 
             entry = this->entries_[iter->second].get();
-            std::cerr << BATT_INSPECT(entry->mapped_client) << BATT_INSPECT(message.src) << std::endl;
+            VLOG(2) << BATT_INSPECT(entry->mapped_client) << BATT_INSPECT(message.src);
 
             if (entry && entry->mapped_client != message.src) {
+                VLOG(1) << "Expired mapping found; removing...";
                 this->mappings_.erase(iter);
                 entry = nullptr;
             }
         }
 
         if (!entry) {
-            std::cerr << "Allocating new entry..." << std::endl;
+            VLOG(1) << "Allocating new entry...";
             usize slot_i = this->max_ports_;
             if (this->entries_.size() < this->max_ports_) {
-                std::cerr << "Growing mapping table: " << this->entries_.size() << " -> "
-                          << (this->entries_.size() + 1) << std::endl;
+                VLOG(1) << "Growing mapping table: " << this->entries_.size() << " -> "
+                        << (this->entries_.size() + 1);
                 slot_i = this->entries_.size();
                 this->entries_.emplace_back();
             } else {
-                std::cerr << "Table is full; finding LRU entry to evict..." << std::endl;
+                VLOG(1) << "Table is full; finding LRU entry to evict...";
                 auto lru = std::min_element(this->entries_.begin(), this->entries_.end(),
                                             [](const auto& l, const auto& r) -> bool {
                                                 if (!l) {
@@ -75,7 +76,7 @@ class MappingTable
                 BATT_CHECK_NE(lru, this->entries_.end());
 
                 const usize lru_i = std::distance(this->entries_.begin(), lru);
-                std::cerr << BATT_INSPECT(lru_i) << "; evicting..." << std::endl;
+                VLOG(1) << BATT_INSPECT(lru_i) << "; evicting...";
 
                 lru->get()->halt();
                 lru->get()->join();
@@ -93,8 +94,8 @@ class MappingTable
 
             entry = this->entries_[slot_i].get();
 
-            std::cerr << "Created new mapping at slot " << slot_i << ": " << message.src << " <-> "
-                      << entry->udp_sock.local_endpoint() << std::endl;
+            VLOG(1) << "Created new mapping at slot " << slot_i << ": " << message.src << " <-> "
+                    << entry->udp_sock.local_endpoint();
         }
 
         BATT_CHECK_NOT_NULLPTR(entry);

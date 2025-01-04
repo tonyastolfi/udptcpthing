@@ -19,6 +19,8 @@
 #include <boost/asio/read.hpp>
 #include <boost/asio/write.hpp>
 
+#include <glog/logging.h>
+
 #include <chrono>
 #include <memory>
 #include <sstream>
@@ -159,7 +161,7 @@ void tcp2udp(boost::asio::io_context& io)
 
     batt::Task accept_task{
         io.get_executor(), [&] {
-            std::cerr << "Listening on " << tcp_ep << std::endl;
+            LOG(INFO) << "Listening on " << tcp_ep;
 
             for (;;) {
                 auto tcp_sock =
@@ -169,7 +171,7 @@ void tcp2udp(boost::asio::io_context& io)
 
                 BATT_CHECK_OK(tcp_sock);
 
-                std::cerr << "Accepted connection from " << tcp_sock->remote_endpoint() << std::endl;
+                LOG(INFO) << "Accepted connection from " << tcp_sock->remote_endpoint() << std::endl;
 
                 auto shared_tcp_sock = std::make_shared<boost::asio::ip::tcp::socket>(std::move(*tcp_sock));
 
@@ -219,17 +221,17 @@ void tcp_connect(bool& connected, boost::asio::ip::tcp::socket& tcp_sock,
                  const boost::asio::ip::tcp::endpoint& ep)
 {
     while (!connected) {
-        std::cerr << "Connecting to " << ep << std::endl;
+        LOG(INFO) << "Connecting to " << ep << std::endl;
         batt::ErrorCode ec = batt::Task::await<batt::ErrorCode>([&](auto&& handler) {
             tcp_sock.async_connect(ep, handler);
         });
         if (ec) {
-            std::cerr << "Failed to connect; retrying after delay..." << std::endl;
+            LOG(ERROR) << "Failed to connect; retrying after delay..." << std::endl;
             batt::Task::sleep(boost::posix_time::seconds(1));
-            std::cerr << "Retrying..." << std::endl;
+            LOG(INFO) << "Retrying..." << std::endl;
             continue;
         } else {
-            std::cerr << "Connected!" << std::endl;
+            LOG(INFO) << "Connected!" << std::endl;
             connected = true;
             break;
         }
@@ -269,14 +271,14 @@ void udp_receiver(boost::asio::ip::udp::socket& udp_srv_sock, batt::Queue<UdpMes
 void udp_sender(batt::Queue<UdpMessage>& queue, boost::asio::ip::udp::socket& udp_sock)
 {
     for (;;) {
-        std::cerr << "Waiting for UDP reply message..." << std::endl;
+        VLOG(2) << "Waiting for UDP reply message...";
 
         batt::StatusOr<UdpMessage> message = queue.await_next();
         if (!message.ok()) {
             break;
         }
 
-        std::cerr << "UDP reply ready to send; sending..." << std::endl;
+        VLOG(2) << "UDP reply ready to send; sending...";
 
         batt::IOResult<usize> n_sent = batt::Task::await<batt::IOResult<usize>>([&](auto&& handler) {
             udp_sock.async_send_to(message->data.buffers, message->dst, BATT_FORWARD(handler));
@@ -285,7 +287,7 @@ void udp_sender(batt::Queue<UdpMessage>& queue, boost::asio::ip::udp::socket& ud
             break;
         }
 
-        std::cerr << "UDP reply sent (" << message->data.size() << " bytes)" << std::endl;
+        VLOG(2) << "UDP reply sent (" << message->data.size() << " bytes)";
     }
 }
 
@@ -294,15 +296,14 @@ void udp_sender(batt::Queue<UdpMessage>& queue, boost::asio::ip::udp::socket& ud
 void tcp_sender(batt::Queue<UdpMessage>& queue, boost::asio::ip::tcp::socket& tcp_sock)
 {
     for (;;) {
-        std::cerr << "Waiting for message" << std::endl;
+        VLOG(2) << "Waiting for message";
 
         batt::StatusOr<UdpMessage> message = queue.await_next();
         if (!message.ok()) {
             return;
         }
 
-        std::cerr << "Message to send: " << BATT_INSPECT(message->data.size()) << BATT_INSPECT(message->src)
-                  << BATT_INSPECT(message->dst) << BATT_INSPECT_STR(message->data.collect_str()) << std::endl;
+        VLOG(2) << "Message to send: " << *message;
 
         MessageFrame frame;
         frame.size = message->data.size();
@@ -319,7 +320,7 @@ void tcp_sender(batt::Queue<UdpMessage>& queue, boost::asio::ip::tcp::socket& tc
             return;
         }
 
-        std::cerr << "Sent header" << std::endl;
+        VLOG(2) << "Sent header";
 
         io_result = batt::Task::await<batt::IOResult<usize>>([&](auto&& handler) {
             boost::asio::async_write(tcp_sock, message->data.buffers, BATT_FORWARD(handler));
@@ -328,7 +329,7 @@ void tcp_sender(batt::Queue<UdpMessage>& queue, boost::asio::ip::tcp::socket& tc
             return;
         }
 
-        std::cerr << "Sent data (" << *io_result << " bytes)" << std::endl;
+        VLOG(2) << "Sent data (" << *io_result << " bytes)";
     }
 }
 
@@ -341,7 +342,7 @@ void tcp_receiver(boost::asio::ip::tcp::socket& tcp_sock, batt::Queue<UdpMessage
     for (;;) {
         MessageFrame frame;
 
-        std::cerr << "Receiving header" << std::endl;
+        VLOG(2) << "Receiving header";
 
         batt::IOResult<usize> io_result = batt::Task::await<batt::IOResult<usize>>([&](auto&& handler) {
             boost::asio::async_read(tcp_sock, batt::MutableBuffer{&frame, sizeof(frame)},
@@ -371,20 +372,19 @@ void tcp_receiver(boost::asio::ip::tcp::socket& tcp_sock, batt::Queue<UdpMessage
         message.dst = boost::asio::ip::udp::endpoint{boost::asio::ip::address_v4{frame.dst_ip.value()},
                                                      frame.dst_port.value()};
 
-        std::cerr << "Receiving data;" << BATT_INSPECT(frame.size) << std::endl;
+        VLOG(2) << "Receiving data;" << BATT_INSPECT(frame.size);
 
         io_result = batt::Task::await<batt::IOResult<usize>>([&](auto&& handler) {
             boost::asio::async_read(tcp_sock, data_buffer.buffers, BATT_FORWARD(handler));
         });
 
-        std::cerr << BATT_INSPECT(io_result) << std::endl;
+        VLOG(2) << BATT_INSPECT(io_result);
 
         if (!io_result.ok()) {
             return;
         }
 
-        std::cerr << "Message received;" << BATT_INSPECT(message.data.size()) << BATT_INSPECT(message.src)
-                  << BATT_INSPECT(message.dst) << BATT_INSPECT_STR(message.data.collect_str()) << std::endl;
+        VLOG(2) << "Message received;" << message;
 
         if (!queue.push(std::move(message)).ok()) {
             return;

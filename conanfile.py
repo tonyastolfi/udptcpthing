@@ -40,5 +40,6 @@ class udptcpthingRecipe(ConanFile):
 
     def requirements(self):
         self.requires("batteries/0.58.1")
+        self.requires("glog/0.7.1")
 
     
