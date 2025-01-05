@@ -23,6 +23,7 @@
 
 #include <chrono>
 #include <memory>
+#include <random>
 #include <sstream>
 #include <string>
 #include <type_traits>
@@ -107,23 +108,20 @@ void udp2tcp(boost::asio::io_context& io)
         },
     };
 
-    batt::Task queue_to_tcp_task{
-        io.get_executor(),
-        [&] {
-            bool connected = false;
-            tcp_connect(connected, tcp_cli_sock, tcp_ep);
-            if (connected) {
-                batt::Task::spawn(  //
-                    io.get_executor(), [&] {
-                        tcp_sender(from_udp_queue, tcp_cli_sock);
-                    });
+    auto queue_to_tcp_fn = [&] {
+        bool connected = false;
+        tcp_connect(connected, tcp_cli_sock, tcp_ep);
+        if (connected) {
+            batt::Task::spawn(  //
+                io.get_executor(), [&] {
+                    tcp_sender(from_udp_queue, tcp_cli_sock);
+                });
 
-                batt::Task::spawn(  //
-                    io.get_executor(), [&] {
-                        tcp_receiver(tcp_cli_sock, from_tcp_queue);
-                    });
-            }
-        },
+            batt::Task::spawn(  //
+                io.get_executor(), [&] {
+                    tcp_receiver(tcp_cli_sock, from_tcp_queue);
+                });
+        }
     };
 
     batt::Task queue_to_udp_task{
@@ -133,8 +131,22 @@ void udp2tcp(boost::asio::io_context& io)
         },
     };
 
+    for (;;) {
+        batt::Task queue_to_tcp_task{
+            io.get_executor(),
+            queue_to_tcp_fn,
+        };
+        queue_to_tcp_task.join();
+
+        LOG(INFO) << "TCP connection task exited";
+
+        batt::ErrorCode ec;
+        tcp_cli_sock.close(ec);
+
+        LOG(INFO) << "TCP connection closed; re-connecting...";
+    }
+
     udp_to_queue_task.join();
-    queue_to_tcp_task.join();
 }
 
 //==#==========+==+=+=++=+++++++++++-+-+--+----- --- -- -  -  -   -
@@ -295,6 +307,48 @@ void udp_sender(batt::Queue<UdpMessage>& queue, boost::asio::ip::udp::socket& ud
 //
 void tcp_sender(batt::Queue<UdpMessage>& queue, boost::asio::ip::tcp::socket& tcp_sock)
 {
+    bool alive = true;
+
+    batt::Task keep_alive_task{
+        tcp_sock.get_executor(),
+        [&] {
+            std::default_random_engine rng{std::random_device{}()};
+            std::uniform_int_distribution<i64> pick_delay_ms{1500, 4500};
+            while (alive) {
+                MessageFrame frame;
+                std::memset(&frame, 0, sizeof(frame));
+                frame.size = kPingMessageSize;
+
+                batt::IOResult<usize> io_result =
+                    batt::Task::await<batt::IOResult<usize>>([&](auto&& handler) {
+                        boost::asio::async_write(tcp_sock, batt::ConstBuffer{&frame, sizeof(frame)},
+                                                 BATT_FORWARD(handler));
+                    });
+
+                if (!io_result.ok()) {
+                    LOG(WARNING) << "Failed to send ping: " << io_result;
+                    batt::ErrorCode ec;
+                    tcp_sock.close(ec);
+                    alive = false;
+                    break;
+                }
+
+                const i64 delay_ms = pick_delay_ms(rng);
+                const batt::ErrorCode ec = batt::Task::sleep(boost::posix_time::milliseconds(delay_ms));
+                if (ec) {
+                    BATT_CHECK(!alive);
+                    break;
+                }
+            }
+        },
+    };
+
+    auto on_scope_exit = batt::finally([&] {
+        alive = false;
+        keep_alive_task.wake();
+        keep_alive_task.join();
+    });
+
     for (;;) {
         VLOG(2) << "Waiting for message";
 
@@ -339,6 +393,8 @@ void tcp_receiver(boost::asio::ip::tcp::socket& tcp_sock, batt::Queue<UdpMessage
 {
     MBuffers buffers;
 
+    usize ping_count = 0;
+
     for (;;) {
         MessageFrame frame;
 
@@ -354,6 +410,14 @@ void tcp_receiver(boost::asio::ip::tcp::socket& tcp_sock, batt::Queue<UdpMessage
         }
 
         BATT_CHECK_EQ(*io_result, sizeof(frame));
+
+        // Special value used to indicate this is a "ping" keep-alive message.  Ignore.
+        //
+        if (frame.size == kPingMessageSize) {
+            ping_count += 1;
+            LOG_EVERY_N(INFO, 10) << "Received keep-alive ping;" << BATT_INSPECT(ping_count);
+            continue;
+        }
 
         BATT_CHECK_LE(frame.size, kMaxMessageSize);
         if (buffers.size() < kMaxMessageSize) {
